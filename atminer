@@ -1,0 +1,462 @@
+#!/usr/bin/env ruby
+
+require 'net/http'
+require 'uri'
+
+$start_time = Time.now
+$qm = 34.chr
+
+def getpage()
+
+  r = Net::HTTP.get_response(URI.parse($url))
+# r = File.open("atminer.test","r")
+
+   puts "generating atminer.raw file"
+   oFile = File.new("atminer.raw","w")
+#   r.each do |this_line|
+#    oFile.puts this_line
+#   end
+   oFile.puts r
+   oFile.close
+  
+   # delete blank lines and insert LF between HTML tags 
+   %x[sed -e '/^[ ]*$/d' -e 's/\>\</\>\\n\</g' atminer.raw > atminer.raw2]
+ 
+   return IO.readlines("atminer.raw2")
+end
+
+def get_elapsed()
+  curr_time = Time.now
+  elapsed_time = (curr_time - $start_time).to_i
+  elapsed_hrs = (elapsed_time / 3600).to_i
+  elapsed_mins = ((elapsed_time / 60) % 60).to_i
+  elapsed_sec = (elapsed_time % 60).to_i
+
+  return elapsed_hrs,elapsed_mins,elapsed_sec
+end
+
+
+def prog_begin()
+  # initialize globals
+  $rFile = File.new("atminer.tmp","w")  # open file to receive output of this script
+  $models = Hash.new
+  $models["HONDA"] = %w[CIVIC]
+  $models["ALFA"] = %w[ALFA8C SPID ALFA164 MIL]
+  $models["VOLVO"] = %w[740]
+  $models["LAM"] = %w[GALLARDO MURCIELAGO AVENT DIABLO JALPA COUNT]
+  $models["POR"] = %w[911 PANAMERA]
+  $models["FER"] = %w[MOND 612SCAGLIE 599GTB ENZO F430 360 328GTS 328GTB FERCALIF 308GTS 308GTSI 308GTBI 308GTB 348GTB 348GTS 348SPI 348TB 348TS F355 550M 575M FF 456GT 456MGT 512BBI 512M 512TR TEST 599GTO F40 F50]
+  $models["HYUND"] = %w[AZERA]
+  $models["AUDI"] = %w[RS4]
+
+end
+
+def prog_main(make,mod)
+
+  c = 0   # initialize list counter
+
+  if $pg == 1  # set URL for page 1
+    $url = "http://www.autotrader.com/fyc/searchresults.jsp?lastBeginningStartYear=1981&num_records=100&search_lang=en&page_location=findacar%3A%3Aispsearchform&search_type=used&distance="+$distance+"&address=37201&marketZipError=false&make="+make+"&model="+mod+"&make2=&start_year="+$start_year+"&end_year=2013&min_price=&max_price=&seller_type=p&transmission=&engine=&drive=&doors=&fuel=&max_mileage=&color=&keywordsrep=&keywordsfyc=&keywords_display=&sort_type=priceDESC&body_code=0&certified=&advanced=&highlightFirstMakeModel=&showZipError=n&default_sort=&systime=&isFlashPlugin=false"
+  end
+
+  printf("Retrieving URL: %s\n",$url)
+  
+  hms = get_elapsed()
+  printf("Starting getpage for page %d (%02d:%02d:%02d)\n",$pg,hms[0],hms[1],hms[2])
+  iFile = getpage()
+
+  hms = get_elapsed()
+  printf("Getpage routine complete (%02d:%02d:%02d)\n",hms[0],hms[1],hms[2])
+
+  $url = nil  # clear URL; it will be redefined if a next page is found
+ 
+  for i in 0..(iFile.size-1)
+    if i % 500 == 0
+      printf("processed %d lines\n",i)
+    end
+
+    if idx = iFile[i].index(/<a name=\"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]\" >/) 
+      name = iFile[i].slice(idx + 9,9)
+
+      # now that we've found a valid name, skip ahead to find price
+      until (iFile[i].index(/span class=\"unlisted-price\"/) ||
+             iFile[i].index(/h3 class=\"listing-price\"/) ||  #private seller
+             iFile[i].index(/<span class=\"msrp-price \"/) ||
+             iFile[i].index(/<span class=\"primary-price\"/) ||
+             iFile[i].index(/<span class=\"enhanced-ncal-price\"/))
+        i += 1
+      end
+      if iFile[i].index(/h3 class=\"listing-price\"/)
+        # for private seller listings, the price is on the line FOLLOWING
+        # the <h3 class="listing-price"> line
+        i += 1
+      end
+      # note the regexp in next line is different from the one in atminer
+      # because this one has to look for the </h3> tag
+      price = iFile[i].slice(iFile[i].index("$")+1,9).gsub(/[,<\/h\1>]/,"")
+      if price.to_i == 0    # did we find an invalid price, i.e., "unlisted"?
+        next i
+      end
+
+      # skip ahead to find &car_year
+      until iFile[i].index(/&car_year=/)
+        i += 1
+      end
+      
+      # check to see if this is a "N in stock at this dealership" listing
+      i += 1
+      if iFile[i].index(" in stock at this dealership")       
+        next i  # if it is, we're not interested
+      else
+        i -= 1
+      end
+
+      year = iFile[i].slice(iFile[i].index("&car_year")+10,4)
+      model_start = iFile[i].index("&model") + 7
+      model = iFile[i].slice(model_start,mod.size)
+
+      # skip ahead to find New/Used
+      until idx = iFile[i].index(/New /) || idx = iFile[i].index(/Used /)
+        i +=1
+      end
+      new_used = iFile[i].slice(idx,3)  # will return "New" or "Use"
+      # this line also contains a description that can be useful for
+      # identifying subtypes of make/model
+      if new_used == "New"
+        alt = iFile[i].partition("New ")
+      else
+        alt = iFile[i].partition("Used ")
+      end
+      desc = alt[2].partition("<")
+      # desc[0] contains the text we want
+      desc[0].gsub!(/&amp;/,"&")
+      desc[0].gsub!(/&quot;/,"\x22")
+
+      if new_used == "New"
+        miles = 0
+      else
+        # skip ahead to find miles
+        # note: not all used cars have miles listed, e.g. 313217178
+        until iFile[i].index(/<li class="milage-info">/)
+          i += 1
+        end
+        miles_start = iFile[i].index(">") + 1
+        miles_end = iFile[i].rindex(/[0-9]/)
+        if miles_end.nil? ||  miles_end == 0  # no numbers found
+          miles = "??????"
+        else
+          miles = iFile[i].slice(miles_start,miles_end+1-miles_start).gsub(",","")
+        end
+      end
+
+      c += 1  # increment list counter
+
+      # routine for constructing model name; default method
+      fullname = ""
+      q = desc[0].split(" ")
+      #  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+      for j in 2...(q.size)  # ignore first 2 fields (new/used, year)
+        fullname += q[j] + " "
+      end
+      fullname.chop!
+
+      # special processing for specific make/model combinations
+      case
+        when make == "POR" && mod == "911"
+          fullname = "911 " + por911(desc[0])
+        when make == "POR" && mod == "PANAMERA"
+          fullname = panamera(desc[0])
+        when make == "BENTL" && mod == "BENCONT"
+          fullname = bencont(desc[0])
+        when make == "BENTL" && mod == "BENMUL"
+          fullname = "Mulsanne"
+        when make == "MB" && mod =~ /AMG/
+          fullname = mod.slice(0,mod.index("A")) + " AMG"
+        when make == "MB" && mod !=~ /AMG/
+          fullname = mod
+        when make == "LEXUS" && mod == "LS460"
+          fullname = ls460(desc[0])
+        when make == "FER" && mod == "458ITALIA"
+          fullname = "458 Italia"
+        when make == "FER" && mod == "F430"
+          fullname = "F430" + f360430(desc[0])
+        when make == "FER" && mod == "360"
+          fullname = "360" + f360430(desc[0])
+        when make == "FER" && mod == "599GTB"
+          fullname = "599 GTB Fiorano"
+        when make == "FER" && mod == "FERCALIF"
+          fullname = "California"
+        when make == "FER" && mod == "612SCAGLIE"
+          fullname = "612 Scaglietti"
+        when make == "FER" && mod == "328GTB"
+          fullname = "328 GTB"
+        when make == "FER" && mod == "328GTS"
+          fullname = "328 GTS"
+        when make == "FER" && mod == "ENZO"
+          fullname = "Enzo"
+        when make == "FER" && mod == "MOND"
+          fullname = "Mondial" + mondial(desc[0])
+        when make == "FER" && mod == "308GTS"
+          fullname = "308 GTS Quattrovalvole"
+        when make == "FER" && mod == "308GTB"
+          fullname = "308 GTB Quattrovalvole"
+        when make == "FER" && mod == "308GTBI"
+          fullname = "308 GTBi"
+        when make == "FER" && mod == "308GTSI"
+          fullname = "308 GTSi"
+        when make == "FER" && mod == "TEST"
+          fullname = "Testarossa"
+        when make == "FER" && mod == "F355"
+          fullname = "F355" + f360430(desc[0])
+        when make == "BMW" && mod == "750LI"
+          fullname = bmw750(desc[0])
+        when make == "HONDA" && mod == "CRX"
+          fullname = desc[0]
+      end
+
+      printf("%9s : %-3s : %4s : %-30s : %6s mi : %07d\n",name,make.slice(0,3),year,fullname.slice(0,30),miles,price.to_i)
+      $rFile.printf("%9s : %-3s : %4s : %-30s : %6s mi : %07d\n",name,make.slice(0,3),year,fullname.slice(0,30),miles,price.to_i)
+    end # if idx
+
+    # check to see if this line has the URL of a subsequent page of results
+    if iFile[i].index(/\Next &gt;/)
+      url_start = iFile[i].index("href")
+      url_end = iFile[i].index("Next &gt")
+      if url_start != nil  # if we found a valid HREF in this line
+        $url = "http://www.autotrader.com" + iFile[i].slice(url_start + 6,url_end - 8 - url_start)
+      else   # there is no next page
+        $url = nil
+      end
+    end
+
+  end # for i in 0..
+  printf("Finished page %d\n",$pg)
+end # def prog_main()
+
+def mondial(desc)
+  variant = ""
+  cc = ""
+  q = desc.downcase.split(" ")
+  x = 0
+  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+  while q[x] != nil
+    if q[x] == "t"
+      variant = " T"
+    elsif q[x] == "cabriolet" || q[x] == "convertible"
+      cc = " Cabriolet"
+    elsif q[x] == "8"
+      variant = " 8"
+    end
+    x += 1
+  end
+  return variant + cc
+end
+
+def bmw750(desc)
+  xdrive = ""
+  q = desc.downcase.split(" ")
+  x = 0
+  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+  while q[x] != nil
+    if q[x] == "xdrive" || q[x] == "x" || q[x] == "x-drive"
+      xdrive = " xDrive"
+    end
+    x += 1
+  end
+  fullname = "750Li" + xdrive
+  return fullname
+end # def bmw750
+
+def f360430(desc)
+  scuderia = ""
+  spider = ""
+  modena = ""
+  stradale = ""
+  f1 = ""
+  gtsberl = ""
+  q = desc.downcase.split(" ")
+  x = 0
+  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+  while q[x] != nil
+    if q[x] == "spider"
+      spider = " Spider"
+    elsif q[x] == "scuderia"
+      scuderia = " Scuderia"
+    elsif q[x] == "modena"
+      modena = " Modena"
+    elsif q[x] == "stradale" || q[x] == "cs" || q[x] == "challenge"
+      stradale = " Challenge Stradale"
+    elsif q[x] == "f1"
+      f1 = " F1"
+    elsif q[x] == "gts"
+      gtsberl = " GTS"
+    end
+    x += 1
+  end
+  suffix = modena + stradale + scuderia + spider + f1 + gtsberl
+  return suffix
+end # def f360-430
+
+def ls460(desc)
+  variant = ""
+  awd = ""
+  q = desc.downcase.split(" ")
+  x = 0
+  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+  while q[x] != nil
+    if q[x] == "l" || q[x] == "ls460l"
+      variant = " L"
+    elsif q[x] == "awd"
+      awd = " AWD"
+    end
+    x += 1
+  end
+  fullname = "LS460" + variant + awd
+  return fullname
+end # def ls460
+
+def bencont(desc)
+  variant = ""
+  cc = ""
+  subvariant = ""
+  q = desc.downcase.split(" ")
+  x = 0
+  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+  while q[x] != nil
+    if q[x] == "coupe"
+      cc = "" # Bentley doesn't use the word "Coupe"
+    elsif q[x] == "cabriolet" || q[x] == "convertible"
+      cc = " Convertible"
+    elsif q[x] == "supersport" || q[x] == "supersports"
+      variant = " Supersports"
+    elsif q[x] == "flying" && q[x+1] = "spur"
+      variant = " Flying Spur"
+    elsif q[x] == "gtc"
+      variant = " GTC"
+    elsif q[x] == "gt"
+      variant = " GT"
+    elsif q[x] == "isr"
+      subvariant = " ISR"
+    elsif q[x] == "v8" || q[x] == "v-8"
+      subvariant = " V8"
+    elsif q[x] == "speed"
+      subvariant = " Speed"
+    end # if
+    x += 1 
+  end
+
+  if cc == "Convertible" && variant =~ /GTC/
+    cc = ""  # "GTC Convertible" is redundant
+  end
+
+  fullname = "Continental"+variant+cc+subvariant
+  return fullname
+end # def bencont()
+
+def por911(desc)
+  bodytype = ""
+  variant = ""
+  cc = ""
+  q = desc.downcase.split(" ")
+  x = 0
+  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+  while q[x] != nil
+    if q[x] == "carrera"
+       bodytype = "Carrera"
+    elsif q[x] == "turbo"
+       bodytype = "Turbo"
+    elsif q[x] == "targa"
+       bodytype = "Targa"
+    elsif q[x] == "speedster"
+       bodytype = "Speedster"
+    elsif q[x] == "black" && q[x+1] == "edition"
+       bodytype = "Black Edition"
+    elsif q[x] == "gt2"
+       bodytype = "GT2"
+    elsif q[x] == "gt3"
+       bodytype = "GT3"
+    elsif q[x] == "coupe"
+       cc = "Coupe"
+    elsif q[x] == "cabriolet" || q[x] == "convertible"
+       cc = "Cabriolet"
+    elsif q[x] == "rs"
+      if q[x-1] == "4.0" || q[x+1] == "4.0"
+        variant = "RS 4.0"
+      else
+        variant = "RS"
+      end
+    elsif q[x] == "4"
+      if q[x-1] == "GTS" || q[x+1] == "GTS"
+        variant = "4 GTS"
+      else
+        variant = "4"
+      end
+    elsif q[x] == "s"
+       variant = "S"
+    elsif q[x] == "4s"
+       variant = "4S"
+    elsif q[x] == "gt"
+       variant = "GT"
+    elsif q[x] == "gts"
+       variant = "GTS"
+    end
+    x += 1
+  end
+
+  if bodytype == ""
+    bodytype = "Carrera"
+  end
+  if cc == "Coupe"
+    cc = ""  # Porsche doesn't add the word "Coupe" to describe coupes
+  end
+  
+  fullname = bodytype + " "
+  if variant != ""
+    fullname += variant + " "
+  end
+  fullname += cc 
+  return fullname
+end # def por911
+
+def panamera(desc)
+  variant = ""
+  q = desc.downcase.split(" ")
+  x = 0
+  print  q[0],":",q[1],":",q[2],":",q[3],":",q[4],":",q[5],":",q[6],"\n"
+  while q[x] != nil
+    if q[x] == "turbo"
+      variant = "Turbo"
+    elsif q[x] == "4"
+      variant = "4"
+    elsif q[x] == "s"
+       variant = "S"
+    elsif q[x] == "4s"
+       variant = "4S"
+    end
+    x += 1
+  end
+
+  return "Panamera " + variant
+end # def panamera
+
+prog_begin()
+
+# $models.each_key do |make|   # all makes/models
+$start_year = "2006"
+$distance = "500"
+["HYUND"].each do |make|         # all models for this make
+  $models[make].each do |mod|
+    $pg = 1    # reset page counter for each make/model
+    while $pg == 1 || $url != nil
+      printf("Processing %s %s page %d\n",make,mod,$pg)
+      prog_main(make,mod)
+      $pg += 1
+    end
+  end
+end
+
+$rFile.close
+%x[sort atminer.tmp | uniq | sort -t: -k4,4 -k3rn,3 -k6r,6 > atminer.out]
+#%x[rm atminer.tmp]
+
+exit
